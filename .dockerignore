@@ -1,0 +1,10 @@
+.venv/
+data/
+runs/
+evalkit/splits/
+.git/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+*.html
