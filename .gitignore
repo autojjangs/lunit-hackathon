@@ -1,0 +1,19 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Local evaluation artifacts
+data/
+runs/
+evalkit/splits/
+
+# OS and editor files
+.DS_Store
+.vscode/
+.idea/
