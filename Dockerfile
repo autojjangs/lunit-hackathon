@@ -7,9 +7,10 @@ WORKDIR /app
 COPY submission/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-COPY system/ /app/system/
+# The runtime is one self-contained package. The MCP tool schemas sit beside it
+# so a container start never depends on a live tools/list round-trip.
 COPY submission/ /app/submission/
-COPY mcp_tools.json /app/mcp_tools.json
+COPY mcp_tools.json /app/submission/mcp_tools.json
 
 ARG LUNIT_FM_API_KEY=lunit_mHCixQhPzR--PRq4FEmZnx1yzdtQLCegz_E_SL58b20
 ENV PYTHONUNBUFFERED=1 \
