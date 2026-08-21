@@ -39,9 +39,22 @@ if not CONFIG["api_key"].strip().startswith("lunit_"):
     raise RuntimeError("LUNIT_FM_API_KEY is missing or invalid")
 
 
+def _log_fatal(stage: str, error: Exception) -> None:
+    message = str(error).replace("\n", " ")[:500]
+    print(
+        f"FATAL stage={stage} error={type(error).__name__} message={message}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 @app.on_event("startup")
 async def verify_model_access():
-    await l2client.preflight()
+    try:
+        await l2client.preflight()
+    except Exception as e:  # noqa: BLE001 - preserve startup cause in runner logs
+        _log_fatal("startup_preflight", e)
+        raise
 
 
 class Message(BaseModel):
@@ -92,7 +105,7 @@ async def chat_completions(req: ChatRequest):
         text = await sysrun.answer(convo)
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
-        sys.stderr.flush()
+        _log_fatal("request_pipeline", e)
         # ponytail: one worker; crash it so the evaluator stops after a fatal failure.
         os._exit(1)
     return {

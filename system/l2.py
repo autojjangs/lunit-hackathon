@@ -51,18 +51,32 @@ class L2Error(RuntimeError):
 
 async def preflight() -> None:
     """Fail startup when the configured model credentials are unusable."""
-    try:
-        r = await client().get("/v1/models")
-    except Exception as e:  # noqa: BLE001
-        raise L2Error(f"model preflight failed: {type(e).__name__}: {e}") from e
-    if r.status_code != 200:
-        raise L2Error(f"model preflight failed: {r.status_code} {r.text[:200]}")
-    try:
-        model_ids = {item.get("id") for item in r.json().get("data", [])}
-    except (TypeError, ValueError) as e:
-        raise L2Error("model preflight returned an invalid model list") from e
-    if L2_MODEL not in model_ids:
-        raise L2Error(f"required model unavailable: {L2_MODEL}")
+    delay = 1.0
+    last = ""
+    for attempt in range(CONFIG["max_retries"]):
+        try:
+            r = await client().get("/v1/models")
+            if r.status_code == 200:
+                try:
+                    model_ids = {item.get("id") for item in r.json().get("data", [])}
+                except (TypeError, ValueError) as e:
+                    raise L2Error("model preflight returned an invalid model list") from e
+                if L2_MODEL not in model_ids:
+                    raise L2Error(f"required model unavailable: {L2_MODEL}")
+                return
+            last = f"{r.status_code} {r.text[:200]}"
+            if r.status_code in (400, 401, 403):
+                raise L2Error(f"model preflight failed: {last}")
+        except L2Error:
+            raise
+        except Exception as e:  # noqa: BLE001
+            last = f"{type(e).__name__}: {e}"
+        if attempt < CONFIG["max_retries"] - 1:
+            await asyncio.sleep(delay)
+            delay *= 2
+    raise L2Error(
+        f"model preflight failed after {CONFIG['max_retries']} attempts: {last}"
+    )
 
 
 async def chat(
