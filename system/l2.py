@@ -20,6 +20,7 @@ import httpx
 from system.config import CONFIG, L2_API_BASE, L2_MODEL
 
 MAX_TOKENS_CAP = 2048  # server-enforced; requests above this return 400
+_slots = asyncio.Semaphore(15)  # leave one slot below the evaluator's 16-way burst
 
 
 def _base() -> str:
@@ -55,7 +56,8 @@ async def preflight() -> None:
     last = ""
     for attempt in range(CONFIG["max_retries"]):
         try:
-            r = await client().get("/v1/models")
+            async with _slots:
+                r = await client().get("/v1/models")
             if r.status_code == 200:
                 try:
                     model_ids = {item.get("id") for item in r.json().get("data", [])}
@@ -117,11 +119,13 @@ async def chat(
             "json_schema": {"name": name, "schema": json_schema},
         }
 
-    delay = 1.0
+    # Evaluator bursts keep the shared model service saturated for several seconds.
+    delay = 5.0
     last = ""
     for attempt in range(CONFIG["max_retries"]):
         try:
-            r = await client().post("/v1/chat/completions", json=body)
+            async with _slots:
+                r = await client().post("/v1/chat/completions", json=body)
             if r.status_code == 200:
                 return r.json()["choices"][0]["message"]
             last = f"{r.status_code} {r.text[:200]}"

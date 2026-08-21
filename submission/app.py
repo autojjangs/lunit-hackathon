@@ -39,13 +39,15 @@ if not CONFIG["api_key"].strip().startswith("lunit_"):
     raise RuntimeError("LUNIT_FM_API_KEY is missing or invalid")
 
 
-def _log_fatal(stage: str, error: Exception) -> None:
+def _log_fatal(stage: str, error: Exception) -> str:
     message = str(error).replace("\n", " ")[:500]
+    detail = f"{type(error).__name__}: {message}"
     print(
-        f"FATAL stage={stage} error={type(error).__name__} message={message}",
+        f"FATAL stage={stage} error={detail}",
         file=sys.stderr,
         flush=True,
     )
+    return detail
 
 
 @app.on_event("startup")
@@ -105,9 +107,11 @@ async def chat_completions(req: ChatRequest):
         text = await sysrun.answer(convo)
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
-        _log_fatal("request_pipeline", e)
-        # ponytail: one worker; crash it so the evaluator stops after a fatal failure.
-        os._exit(1)
+        detail = _log_fatal("request_pipeline", e)
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"message": detail}},
+        )
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:16]}",
         "object": "chat.completion",
