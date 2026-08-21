@@ -1,35 +1,74 @@
-"""Stage 1 — RETRIEVAL.  [AGENT MAY EDIT]
-
-L2 was trained to gather evidence with the Lunit MCP tools and then call
-`finalize_retrieval`. That function is NOT an MCP tool: we define it, hand it to
-the model alongside the MCP tools, and treat the call as the stage terminator.
-
-Failure policy — this is the most dangerous loop in the system:
-  * hard cap on actual MCP calls (CONFIG["max_mcp_calls"])
-  * every tool error becomes a string, never an exception
-  * finalization gets a reserved model call; unselected evidence is discarded
-A retrieval failure must degrade the answer, never lose the turn.
-"""
+"""Bounded MCP retrieval with route-specific tool exposure."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+from typing import Sequence
 
 from system import l2, mcpc
 from system.config import CONFIG
+from system.contracts import ExactFact, EvidenceItem, RetrievalResult, ToolBundle
 
 HERE = Path(__file__).resolve().parent
-PROMPT = (HERE / "prompts" / "retrieval.md").read_text().strip()
+PROMPT = (HERE / "prompts" / "retrieval.md").read_text(encoding="utf-8").strip()
+
+TOOL_BUNDLES: dict[ToolBundle, frozenset[str]] = {
+    "general_guideline": frozenset(
+        {
+            "index_list_documents",
+            "index_get_document_structure",
+            "index_get_relevant_nodes",
+            "index_keyword_search",
+            "index_get_page_content",
+        }
+    ),
+    "general_rag": frozenset(
+        {
+            "rag_get_all_data_sources",
+            "rag_get_data_source_detail",
+            "rag_sql_query",
+            "rag_vector_query",
+        }
+    ),
+    "drug_safety": frozenset(
+        {
+            "adr_retrieve_drug_info",
+            "openapi_mfds_check_drug_permission",
+            "openapi_mfds_get_drug_indication",
+            "openapi_mfds_find_drugs_by_ingredient",
+        }
+    ),
+    "disease_code": frozenset(
+        {
+            "kcd_get_name",
+            "kcd_search_codes",
+            "openapi_hira_disease_check_code",
+        }
+    ),
+    "reimbursement": frozenset(
+        {
+            "openapi_hira_get_drug_price",
+            "hira_updates_search",
+        }
+    ),
+    "law": frozenset(
+        {
+            "openapi_law_search",
+            "openapi_law_list_articles",
+            "openapi_law_get_article",
+        }
+    ),
+}
 
 FINALIZE = {
     "type": "function",
     "function": {
         "name": "finalize_retrieval",
         "description": (
-            "End the retrieval stage. Report every item that is relevant to the "
-            "question by its cite_uid. Call this as soon as the evidence is "
-            "sufficient, or immediately if no retrieval is needed."
+            "End retrieval. Select only relevant cite_uid values, record which "
+            "subquestions each item supports, and list unresolved subquestion IDs."
         ),
         "parameters": {
             "type": "object",
@@ -45,168 +84,376 @@ FINALIZE = {
                         "properties": {
                             "cite_uid": {"type": "string"},
                             "relevance_score": {"type": "number"},
+                            "supports": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
                         },
-                        "required": ["cite_uid", "relevance_score"],
+                        "required": ["cite_uid", "relevance_score", "supports"],
                         "additionalProperties": False,
                     },
                 },
+                "unresolved": {"type": "array", "items": {"type": "string"}},
                 "note": {"type": "string"},
             },
-            "required": ["status", "items", "note"],
+            "required": ["status", "items", "unresolved", "note"],
             "additionalProperties": False,
         },
     },
 }
 
 
-def _harvest(blob: str, seen: dict) -> None:
-    """Pull every cite_uid -> surrounding text out of a raw tool result."""
+def resolve_tool_allow(bundles: Sequence[ToolBundle]) -> set[str]:
+    allowed: set[str] = set()
+    for bundle in bundles:
+        allowed.update(TOOL_BUNDLES.get(bundle, ()))
+    configured = CONFIG.get("retrieval_tool_allow")
+    if configured is not None:
+        allowed.intersection_update(set(configured))
+    return allowed
+
+
+def not_needed_result(
+    note: str = "No external evidence was requested.",
+) -> RetrievalResult:
+    return {
+        "status": "not_needed",
+        "note": note,
+        "evidence": [],
+        "trace": [],
+        "errors": [],
+        "unresolved": [],
+        "timed_out": False,
+    }
+
+
+def _failure_result(
+    note: str,
+    *,
+    subquestions: Sequence[str] = (),
+    errors: Sequence[str] = (),
+    timed_out: bool = False,
+) -> RetrievalResult:
+    return {
+        "status": "no_evidence",
+        "note": note,
+        "evidence": [],
+        "trace": [],
+        "errors": list(errors),
+        "unresolved": [f"f{i}" for i, _ in enumerate(subquestions, 1)],
+        "timed_out": timed_out,
+    }
+
+
+def unavailable_result(
+    note: str,
+    *,
+    subquestions: Sequence[str] = (),
+    errors: Sequence[str] = (),
+) -> RetrievalResult:
+    """Return an explicit no-evidence result for a skipped or failed stage."""
+    return _failure_result(note, subquestions=subquestions, errors=errors)
+
+
+async def run(
+    query: str,
+    *,
+    search_hint: str = "",
+    bundles: Sequence[ToolBundle] = (),
+    subquestions: Sequence[str] = (),
+    source_messages: Sequence[dict] = (),
+    exact_facts: Sequence[ExactFact] = (),
+    timeout_s: float | None = None,
+) -> RetrievalResult:
+    """Retrieve bounded evidence using only tools allowed by ``bundles``."""
+    allowed = resolve_tool_allow(bundles)
+    if not allowed:
+        if bundles:
+            return _failure_result(
+                "No tools are enabled for the selected route.",
+                subquestions=subquestions,
+            )
+        return not_needed_result()
+
+    timeout = float(timeout_s or CONFIG.get("retrieval_timeout_s", 30.0))
     try:
-        obj = json.loads(blob)
-    except Exception:  # noqa: BLE001
-        return
+        async with asyncio.timeout(max(0.1, timeout)):
+            return await _run(
+                query,
+                search_hint=search_hint,
+                allowed=allowed,
+                subquestions=subquestions,
+                source_messages=source_messages,
+                exact_facts=exact_facts,
+            )
+    except TimeoutError:
+        return _failure_result(
+            "Retrieval exceeded its total time budget.",
+            subquestions=subquestions,
+            errors=["retrieval_timeout"],
+            timed_out=True,
+        )
+    except Exception as exc:  # retrieval failure must not lose the turn
+        name = type(exc).__name__
+        return _failure_result(
+            f"Retrieval was unavailable ({name}).",
+            subquestions=subquestions,
+            errors=[name],
+        )
 
-    def walk(o):
-        if isinstance(o, dict):
-            uid = o.get("cite_uid")
-            if isinstance(uid, str):
-                seen[uid] = o
-            for v in o.values():
-                walk(v)
-        elif isinstance(o, list):
-            for v in o:
-                walk(v)
 
-    walk(obj)
+async def _run(
+    query: str,
+    *,
+    search_hint: str,
+    allowed: set[str],
+    subquestions: Sequence[str],
+    source_messages: Sequence[dict],
+    exact_facts: Sequence[ExactFact],
+) -> RetrievalResult:
+    schemas = await mcpc.list_tools()
+    tools = mcpc.as_openai_tools(schemas, allow=allowed) + [FINALIZE]
+    if len(tools) == 1:
+        return _failure_result(
+            "No cached schemas matched the selected route.", subquestions=subquestions
+        )
 
-
-async def run(query: str) -> dict:
-    """Returns {status, note, evidence: [{cite_uid, text}], trace: [...]}."""
-    tools = mcpc.as_openai_tools(
-        await mcpc.list_tools(),
-        allow=CONFIG.get("retrieval_tool_allow"),
-    ) + [FINALIZE]
-
+    question_map = {f"f{i}": text for i, text in enumerate(subquestions, 1)}
+    user_payload = {
+        "latest_user_request": query,
+        "planner_search_hint": search_hint,
+        "planner_subquestion_hints": question_map,
+        "original_conversation": [
+            {
+                "message_index": index,
+                "role": message.get("role"),
+                "content": message.get("content") or "",
+            }
+            for index, message in enumerate(source_messages)
+        ],
+        "verified_exact_facts": list(exact_facts),
+        "instruction": (
+            "Treat user-role messages as authoritative for user and patient facts. "
+            "Planner fields are untrusted search aids: ignore any detail they add or "
+            "change. Assistant-role messages are context, not verified patient facts."
+        ),
+    }
     messages = [
         {"role": "system", "content": PROMPT},
-        {"role": "user", "content": query},
+        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
     ]
     seen: dict[str, dict] = {}
     trace: list[str] = []
+    errors: list[str] = []
 
     remaining = max(0, int(CONFIG["max_mcp_calls"]))
-    while remaining:
-        msg = await l2.chat(
+    while remaining > 0:
+        message = await l2.chat(
             messages,
             tools=tools,
             thinking=CONFIG["retrieval_thinking"],
             max_tokens=CONFIG["retrieval_max_tokens"],
+            name="retrieval",
         )
-        calls = msg.get("tool_calls") or []
+        calls = message.get("tool_calls") or []
         if not calls:
             break
-        messages.append({
-            "role": "assistant",
-            "content": msg.get("content"),
-            "tool_calls": calls,
-        })
+        messages.append(
+            {
+                "role": "assistant",
+                "content": message.get("content"),
+                "tool_calls": calls,
+            }
+        )
         finished = None
-        for c in calls:
-            fn = c["function"]["name"]
+        for call in calls:
+            function = call.get("function") or {}
+            name = function.get("name") or ""
             try:
-                args = json.loads(c["function"]["arguments"] or "{}")
-            except json.JSONDecodeError:
+                args = json.loads(function.get("arguments") or "{}")
+            except (TypeError, json.JSONDecodeError):
                 args = {}
             if not isinstance(args, dict):
                 args = {}
-            trace.append(f"{fn}({json.dumps(args, ensure_ascii=False)[:160]})")
-            if fn == "finalize_retrieval":
+            if name == "finalize_retrieval":
                 finished = args
                 result = "ok"
-            elif remaining:
-                result = await mcpc.call(fn, args)
-                _harvest(result, seen)
-                remaining -= 1
+            elif name not in allowed:
+                result = "TOOL_ERROR: tool is not allowed for the selected route"
+                errors.append(f"disallowed_tool:{name or 'unknown'}")
+                remaining = max(0, remaining - 1)
+            elif remaining > 0:
+                # Record only actual MCP executions. Arguments and skipped/disallowed
+                # attempts can contain patient data or inflate source-call counts.
+                trace.append(name)
+                result = await mcpc.call(name, args)
+                if result.startswith("TOOL_ERROR:"):
+                    error_kind = (
+                        "tool_timeout" if "timeout" in result.lower() else "tool_error"
+                    )
+                    errors.append(f"{error_kind}:{name}")
+                else:
+                    _harvest(result, seen)
+                remaining = max(0, remaining - 1)
             else:
                 result = "TOOL_ERROR: retrieval budget exhausted"
-            messages.append({
-                "role": "tool",
-                "tool_call_id": c["id"],
-                "content": result[:8000],
-            })
+                errors.append("retrieval_budget_exhausted")
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.get("id") or f"call-{len(trace)}",
+                    "content": result[:8000],
+                }
+            )
         if finished is not None:
-            return _pack(finished, seen, trace)
+            return _pack(finished, seen, trace, errors, question_map)
 
-    # Reserve one model call for the required stage terminator.
-    msg = await l2.chat(
+    message = await l2.chat(
         messages,
         tools=tools,
-        tool_choice={
-            "type": "function",
-            "function": {"name": "finalize_retrieval"},
-        },
+        tool_choice={"type": "function", "function": {"name": "finalize_retrieval"}},
         thinking=CONFIG["retrieval_thinking"],
         max_tokens=CONFIG["retrieval_max_tokens"],
+        name="retrieval_finalize",
     )
-    for call in msg.get("tool_calls") or []:
-        if call["function"]["name"] != "finalize_retrieval":
+    for call in message.get("tool_calls") or []:
+        function = call.get("function") or {}
+        if function.get("name") != "finalize_retrieval":
             continue
         try:
-            args = json.loads(call["function"]["arguments"] or "{}")
-        except json.JSONDecodeError:
+            args = json.loads(function.get("arguments") or "{}")
+        except (TypeError, json.JSONDecodeError):
             break
-        if not isinstance(args, dict):
-            break
-        trace.append(f"finalize_retrieval({json.dumps(args, ensure_ascii=False)[:160]})")
-        return _pack(args, seen, trace)
+        if isinstance(args, dict):
+            return _pack(args, seen, trace, errors, question_map)
 
-    return _pack(
-        {"status": "no_evidence", "items": [], "note": "retrieval budget exhausted"},
-        seen, trace,
+    return _failure_result(
+        "Retrieval ended without a valid finalization.",
+        subquestions=subquestions,
+        errors=[*errors, "invalid_finalization"],
     )
 
 
-def _pack(final: dict, seen: dict, trace: list[str]) -> dict:
-    items = final.get("items")
-    if not isinstance(items, list):
-        items = []
-    picked = [
-        i.get("cite_uid") for i in items
-        if isinstance(i, dict) and i.get("cite_uid")
+def _harvest(blob: str, seen: dict[str, dict]) -> None:
+    """Collect citable objects from a JSON tool result."""
+    try:
+        obj = json.loads(blob)
+    except (TypeError, json.JSONDecodeError):
+        return
+
+    def walk(value):
+        if isinstance(value, dict):
+            uid = value.get("cite_uid")
+            if isinstance(uid, str) and uid:
+                seen[uid] = value
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(obj)
+
+
+def _pack(
+    final: dict,
+    seen: dict[str, dict],
+    trace: list[str],
+    errors: list[str],
+    question_map: dict[str, str],
+) -> RetrievalResult:
+    selected = final.get("items")
+    if not isinstance(selected, list):
+        selected = []
+
+    evidence: list[EvidenceItem] = []
+    covered: set[str] = set()
+    used_uids: set[str] = set()
+    for selection in selected:
+        if not isinstance(selection, dict):
+            continue
+        uid = selection.get("cite_uid")
+        if not isinstance(uid, str) or uid in used_uids or uid not in seen:
+            continue
+        supports = [
+            item
+            for item in selection.get("supports", [])
+            if isinstance(item, str) and item in question_map
+        ]
+        used_uids.add(uid)
+        covered.update(supports)
+        evidence.append({"cite_uid": uid, "item": seen[uid], "supports": supports})
+
+    explicit_unresolved = final.get("unresolved")
+    if not isinstance(explicit_unresolved, list):
+        explicit_unresolved = []
+    unresolved = [
+        item
+        for item in explicit_unresolved
+        if isinstance(item, str) and item in question_map
     ]
-    ev = []
-    for uid in picked:
-        item = seen.get(uid)
-        if item:
-            ev.append({"cite_uid": uid, "item": item})
-    status = final.get("status", "no_evidence")
+    for question_id in question_map:
+        if question_id not in covered and question_id not in unresolved:
+            unresolved.append(question_id)
+
+    status = final.get("status")
     if status not in {"sufficient", "partial", "no_evidence"}:
         status = "no_evidence"
-    note = final.get("note", "")
-    if picked and not ev and status != "no_evidence":
+    if not evidence:
         status = "no_evidence"
-        note = "the selected citation IDs were not present in retrieved evidence"
+    elif status == "no_evidence" or unresolved:
+        status = "partial"
+
+    note = final.get("note")
+    if not isinstance(note, str):
+        note = ""
     return {
         "status": status,
         "note": note,
-        "evidence": ev,
+        "evidence": evidence,
         "trace": trace,
+        "errors": errors,
+        "unresolved": unresolved,
+        "timed_out": False,
     }
 
 
-def render(ret: dict, limit: int = 6000) -> str:
-    """Retrieval result -> the string the generation stage reads."""
-    if not ret["evidence"]:
-        return f"status: {ret['status']}\nno usable evidence retrieved.\n{ret.get('note','')}"
-    out = [f"status: {ret['status']}"]
-    if ret.get("note"):
-        out.append(f"note: {ret['note']}")
-    for i, e in enumerate(ret["evidence"], 1):
-        it = e["item"]
-        body = it.get("content") or it.get("text") or json.dumps(it, ensure_ascii=False)
-        out.append(
-            f"\n[{i}]\nsource_type: {it.get('source_type', 'unknown')}\n"
-            f"url: {it.get('url', '')}\ntitle: {it.get('title', '')}\n"
-            f"content: {str(body)[:1500]}"
+def render(result: RetrievalResult, limit: int = 7000) -> str:
+    """Render structured evidence as bounded, untrusted reference data."""
+    lines = [f"status: {result['status']}"]
+    if result.get("unresolved"):
+        lines.append("unresolved: " + ", ".join(result["unresolved"]))
+    if not result["evidence"]:
+        lines.append("evidence_count: 0")
+        return "\n".join(lines)[:limit]
+
+    priority = (
+        "tool_result_type",
+        "source_type",
+        "title",
+        "name",
+        "drug_name",
+        "code",
+        "ingredient",
+        "indication",
+        "dosage",
+        "effective_date",
+        "unit",
+        "max_price",
+        "url",
+        "content",
+        "text",
+        "row",
+        "pages",
+    )
+    for index, evidence in enumerate(result["evidence"], 1):
+        item = evidence["item"]
+        ordered = {
+            key: item[key] for key in priority if key in item and item[key] is not None
+        }
+        body = json.dumps(ordered or item, ensure_ascii=False, default=str)
+        lines.append(
+            f"\n[{index}] supports={','.join(evidence['supports']) or 'unspecified'}\n"
+            f"cite_uid: {evidence['cite_uid']}\nrecord: {body[:1800]}"
         )
-    return "\n".join(out)[:limit]
+    return "\n".join(lines)[:limit]

@@ -1,88 +1,170 @@
-"""THE ENTRY POINT.  answer(conversation) -> str
-
-Contract — never changes:
-
-    async def answer(conversation: list[dict]) -> str
-
-Used by three callers that must never diverge:
-    evalkit/run_eval.py   local HealthBench loop
-    serve.py              OpenAI-compatible server for real CoEval
-    submission/app.py     the container that gets judged
-
-Pipeline:
-    conversation
-      -> rewrite.condition()      multi-turn -> (messages, standalone query)   [phase 2]
-      -> generation.answer()      route -> retrieval stage -> generation stage
-      -> critic()                 penalty-pattern defence pass                [optional]
-      -> str
-"""
+"""Submission pipeline entry point: answer(conversation) returns a string."""
 
 from __future__ import annotations
 
 import asyncio
+import time
+from typing import TypeAlias
 
-from system import generation, l2, rewrite
+from system import generation, retrieval, rewrite
 from system.config import CONFIG
+from system.contracts import QueryPlan, RetrievalResult
 
-# kept importable for evalkit's SHOW_SYSTEM_PROMPT_TO_JUDGE flag
+# Kept importable for local evaluation helpers.
 SYSTEM_PROMPT = generation.PROMPT
+Prepared: TypeAlias = tuple[
+    list[dict], QueryPlan, RetrievalResult, dict[str, float]
+]
 
-CRITIC_PROMPT = """Revise the draft answer so that it:
-- answers exactly what was asked, without expanding past that scope
-- keeps every clinically important point, including red flags and when to seek care
-- does not assert a definitive diagnosis without qualifying it
-- does not bury the key guidance under unnecessary detail
-- keeps any [n] citations exactly as they are
 
-Return ONLY the revised answer, no preamble.
+class PipelineError(RuntimeError):
+    """Pipeline failure carrying only content-free operational metadata."""
 
-# Question
-{q}
+    def __init__(self, metadata: dict):
+        super().__init__("pipeline failed")
+        self.metadata = metadata
 
-# Draft
-{draft}"""
+
+def _operational_meta(
+    plan: QueryPlan, retrieved: RetrievalResult, timings: dict[str, float]
+) -> dict:
+    return {
+        "route": plan["route"],
+        "bundles": list(plan["bundles"]),
+        "answer_focus_count": len(plan["answer_focus"]),
+        "coverage_verified": False,
+        "coverage_repair": False,
+        "fallback": "",
+        "urgency": plan["urgency"],
+        "planning_failed": plan["planning_failed"],
+        "planning_outcome": plan["planning_outcome"],
+        "tool_calls": list(retrieved["trace"]),
+        "retrieval_status": retrieved["status"],
+        "n_evidence": len(retrieved["evidence"]),
+        "retrieval_errors": list(retrieved["errors"]),
+        "retrieval_timed_out": retrieved["timed_out"],
+        "latency_ms": dict(timings),
+    }
+
+
+async def _prepare(conversation: list[dict]) -> Prepared:
+    """Plan and retrieve once, while retaining the complete source conversation."""
+    timings: dict[str, float] = {}
+    started = time.perf_counter()
+    plan = await rewrite.build_plan(conversation)
+    timings["planner"] = (time.perf_counter() - started) * 1000
+
+    retrieved = retrieval.not_needed_result()
+    started = time.perf_counter()
+    if plan["planning_failed"]:
+        retrieved = retrieval.unavailable_result(
+            "Planning unavailable.",
+            subquestions=plan["subquestions"],
+            errors=["planner_unavailable"],
+        )
+    elif CONFIG.get("retrieval") and plan["route"] == "retrieve":
+        retrieved = await retrieval.run(
+            rewrite.last_user(conversation),
+            search_hint=plan["standalone_question"],
+            bundles=plan["bundles"],
+            subquestions=[item["text"] for item in plan["answer_focus"]],
+            source_messages=conversation,
+            exact_facts=plan["exact_facts"],
+        )
+    timings["retrieval"] = (time.perf_counter() - started) * 1000
+    return list(conversation), plan, retrieved, timings
+
+
+async def _generate_prepared(prepared: Prepared) -> tuple[str, dict]:
+    conversation, plan, retrieved, timings = prepared
+    started = time.perf_counter()
+    answer, meta = await generation.generate_final(
+        conversation,
+        plan=plan,
+        retrieved=retrieved,
+    )
+    timings = dict(timings)
+    timings["generation"] = (time.perf_counter() - started) * 1000
+    meta["latency_ms"] = timings
+    return answer, meta
 
 
 async def _once(conversation: list[dict]) -> tuple[str, dict]:
-    convo, query = await rewrite.condition(conversation)
-    out, meta = await generation.answer(convo, query)
-    return out, meta
-
-
-async def answer(conversation: list[dict]) -> str:
-    n = max(1, int(CONFIG.get("num_candidates", 1)))
-    if n == 1:
-        draft, _meta = await _once(conversation)
-    else:
-        # the server rejects n>1, so candidates are independent requests
-        cands = await asyncio.gather(
-            *[_once(conversation) for _ in range(n)], return_exceptions=True
-        )
-        ok = [c[0] for c in cands if isinstance(c, tuple) and c[0]]
-        if not ok:
-            raise RuntimeError("all candidates failed")
-        draft = max(ok, key=len)  # placeholder selector — replace with a real judge
-
-    if CONFIG.get("critic_pass"):
-        q = rewrite.last_user(conversation)
-        revised = await l2.text(
-            [{"role": "user", "content": CRITIC_PROMPT.format(q=q, draft=draft)}],
-            thinking=CONFIG["critic_thinking"],
-            max_tokens=CONFIG["max_tokens"],
-        )
-        if revised:
-            draft = revised
-
-    if not draft.strip():
-        raise RuntimeError("empty answer")
-    return draft
+    return await _generate_prepared(await _prepare(conversation))
 
 
 async def answer_verbose(conversation: list[dict]) -> tuple[str, dict]:
-    """Same pipeline, but returns the routing/retrieval metadata. Debug only."""
-    return await _once(conversation)
+    """Run the production path and return content-free operational metadata."""
+    total_started = time.perf_counter()
+    prepared = await _prepare(conversation)
+    source_conversation, plan, retrieved, _timings = prepared
+    n = max(1, int(CONFIG.get("num_candidates", 1)))
+
+    try:
+        if n == 1:
+            draft, meta = await _generate_prepared(prepared)
+        else:
+            candidates = await asyncio.gather(
+                *[_generate_prepared(prepared) for _ in range(n)],
+                return_exceptions=True,
+            )
+            valid = [item for item in candidates if isinstance(item, tuple) and item[0]]
+            if not valid:
+                raise RuntimeError("all candidates failed")
+            draft, meta = max(valid, key=lambda item: len(item[0]))
+    except Exception as exc:
+        raise PipelineError(_operational_meta(plan, retrieved, _timings)) from exc
+
+    critic_attempted = False
+    critic_adopted = False
+    critic_rollback = ""
+    critic_ms = 0.0
+    # A critic adds latency and a new regression surface. Only use it, when enabled,
+    # for non-urgent multipart answers where a completeness pass has a clear purpose.
+    if (
+        CONFIG.get("critic_pass")
+        and plan["urgency"] != "urgent"
+        and len(plan["answer_focus"]) >= 3
+    ):
+        critic_attempted = True
+        started = time.perf_counter()
+        draft, critic_adopted, critic_rollback = await generation.revise_with_critic(
+            source_conversation,
+            plan=plan,
+            retrieved=retrieved,
+            draft=draft,
+            draft_statuses=dict(meta.get("coverage_statuses") or {}),
+        )
+        critic_ms = (time.perf_counter() - started) * 1000
+
+    if not draft.strip():
+        raise RuntimeError("empty answer")
+
+    latency = dict(meta.get("latency_ms") or {})
+    latency["critic"] = critic_ms
+    latency["total"] = (time.perf_counter() - total_started) * 1000
+    meta.update(
+        {
+            "latency_ms": latency,
+            "critic_attempted": critic_attempted,
+            "critic_adopted": critic_adopted,
+            "critic_rollback": critic_rollback,
+        }
+    )
+    return draft, meta
+
+
+async def answer(conversation: list[dict]) -> str:
+    """Return only the L2-generated user-visible answer."""
+    text, _meta = await answer_verbose(conversation)
+    return text
 
 
 if __name__ == "__main__":
-    demo = [{"role": "user", "content": "I've had a dull headache for three days. Should I worry?"}]
+    demo = [
+        {
+            "role": "user",
+            "content": "I've had a dull headache for three days. Should I worry?",
+        }
+    ]
     print(asyncio.run(answer(demo)))

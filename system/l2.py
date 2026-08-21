@@ -12,8 +12,10 @@ The two facts that shape this file:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
+from copy import deepcopy
 from typing import Any
 
 import httpx
@@ -33,6 +35,50 @@ def _key() -> str:
 
 
 _client: httpx.AsyncClient | None = None
+_trace: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "l2_request_trace", default=None
+)
+
+
+def _stage(name: str) -> str:
+    if name == "query_plan":
+        return "planner"
+    if name.startswith("retrieval"):
+        return "retrieval"
+    if name == "critic":
+        return "critic"
+    if name in {"final_answer", "coverage_repair", "plain_final_fallback"}:
+        return "generation"
+    return "other"
+
+
+def begin_trace():
+    """Start a request-scoped, content-free L2 call trace."""
+    return _trace.set(
+        {
+            "logical_calls": {},
+            "http_attempts": {},
+            "calls": [],
+        }
+    )
+
+
+def trace_snapshot() -> dict[str, Any]:
+    return deepcopy(_trace.get() or {"logical_calls": {}, "http_attempts": {}, "calls": []})
+
+
+def end_trace(token) -> dict[str, Any]:
+    data = trace_snapshot()
+    _trace.reset(token)
+    return data
+
+
+def _increment(bucket: str, stage: str) -> None:
+    trace = _trace.get()
+    if trace is None:
+        return
+    values = trace[bucket]
+    values[stage] = int(values.get(stage, 0)) + 1
 
 
 def client() -> httpx.AsyncClient:
@@ -48,6 +94,10 @@ def client() -> httpx.AsyncClient:
 
 
 class L2Error(RuntimeError):
+    pass
+
+
+class StructuredParseError(L2Error):
     pass
 
 
@@ -99,13 +149,36 @@ async def chat(
             "json_schema": {"name": name, "schema": json_schema},
         }
 
+    stage = _stage(name)
+    _increment("logical_calls", stage)
     delay = 1.0
     last = ""
     for attempt in range(CONFIG["max_retries"]):
         try:
+            _increment("http_attempts", stage)
             r = await client().post("/v1/chat/completions", json=body)
             if r.status_code == 200:
-                return r.json()["choices"][0]["message"]
+                payload = r.json()
+                choice = payload["choices"][0]
+                trace = _trace.get()
+                if trace is not None:
+                    usage = payload.get("usage") or {}
+                    trace["calls"].append(
+                        {
+                            "name": name,
+                            "stage": stage,
+                            "finish_reason": choice.get("finish_reason") or "unknown",
+                            "usage": {
+                                key: int(usage.get(key) or 0)
+                                for key in (
+                                    "prompt_tokens",
+                                    "completion_tokens",
+                                    "total_tokens",
+                                )
+                            },
+                        }
+                    )
+                return choice["message"]
             last = f"{r.status_code} {r.text[:200]}"
             if r.status_code in (400, 401, 403):  # invalid request/auth is not transient
                 raise L2Error(last)
@@ -131,4 +204,4 @@ async def structured(messages: list[dict], schema: dict, **kw) -> dict:
     try:
         return json.loads(raw)
     except json.JSONDecodeError as e:
-        raise L2Error(f"structured call returned non-JSON: {raw[:200]}") from e
+        raise StructuredParseError("structured call returned non-JSON") from e

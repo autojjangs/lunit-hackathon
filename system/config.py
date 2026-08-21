@@ -13,43 +13,40 @@ CONFIG = {
     "api_key": os.environ.get("LUNIT_FM_API_KEY", ""),
     "timeout": 180.0,
     "max_retries": 3,
-
     # ---- sampling ----------------------------------------------------------
     # max_tokens is capped at 2048 by the server and reasoning eats the same
     # budget.  thinking=False measured: -38% latency, +10% answer length.
     "max_tokens": 2048,
     "temperature": 0.0,
-    "thinking": False,          # fallback for direct l2.chat() callers
-    "extra": {},               # top_p / top_k / min_p / repetition_penalty
+    "thinking": False,  # fallback for direct l2.chat() callers
+    "extra": {},  # top_p / top_k / min_p / repetition_penalty
     # n>1 is REJECTED by the server ("n must be 1"); num_candidates below
     # issues that many independent requests instead.
-
-    # ---- stage 1: retrieval ------------------------------------------------
-    "retrieval": False,         # B0: raw L2 call without retrieval
+    # ---- stage 1: planning and retrieval ----------------------------------
+    "retrieval": True,
     "retrieval_tool_choice": "auto",  # auto | required
     "retrieval_thinking": False,
-    "max_mcp_calls": 6,         # actual MCP calls; finalization is reserved
+    "max_mcp_calls": 4,  # actual MCP calls; finalization is reserved
+    "retrieval_timeout_s": 30.0,
     "retrieval_max_tokens": 1024,
-    "retrieval_tool_allow": None,  # None = all 21 MCP tools; or a set of names
-
+    "retrieval_tool_allow": None,  # optional global intersection with route tools
+    "route_max_bundles": 3,
+    "max_subquestions": 6,
+    "planner_max_tokens": 768,
+    "planner_timeout_s": 12.0,
     # ---- stage 2: generation ----------------------------------------------
-    # "none" = no system prompt at all (B0, the rawest baseline)
-    # "minimal" = one generic line (B1)
-    # "constitution" = the 2026-08-20 benchmark-derived policy (an EXPERIMENT,
-    #                  not a baseline - see the provenance header in that file)
-    "prompt": "none",
+    # "none" disables the prompt; any other value is a filename stem.
+    "prompt": "minimal",
     "generation_thinking": False,
-    "cite": True,               # cite retrieved evidence as [1], [2]
-
-    # ---- multi-turn (PHASE 2 — leave off until the bench loop has a baseline)
-    "rewrite": False,           # self-contained query rewriting
-    "case_summary": False,      # rolling patient-state summary across turns
-    "history_turns": 0,         # 0 = pass full history verbatim
-
+    "cite": True,  # cite retrieved evidence as [1], [2]
+    # ---- multi-turn --------------------------------------------------------
+    "rewrite": True,  # structured query planning on every turn
+    "case_summary": False,  # never replace the original three-turn history
+    "history_turns": 0,  # 0 = pass full history verbatim
     # ---- post-generation ---------------------------------------------------
-    "critic_pass": False,       # penalty-pattern defence pass
+    "critic_pass": False,  # penalty-pattern defence pass
     "critic_thinking": False,
-    "num_candidates": 1,        # >1 = N independent requests, then pick/merge
+    "num_candidates": 1,  # >1 = N independent requests, then pick/merge
 }
 
 
@@ -57,6 +54,7 @@ CONFIG = {
 # baseline.sh passes a JSON dict here so the ladder can be run without editing
 # this file. Never used by the submission container.
 import json as _json  # noqa: E402
+
 _ov = os.environ.get("BASELINE_OVERRIDE", "").strip()
 if _ov and _ov != "{}":
     CONFIG.update(_json.loads(_ov))
