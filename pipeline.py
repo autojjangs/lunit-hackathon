@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from typing import Any
@@ -12,6 +13,7 @@ MODEL = "Lunit/L2-preview"
 API_BASE = "https://model.hackathon.lunit.io"
 MAX_TOKENS = 2048
 CHECKLIST_TOKENS = 512
+L2_MAX_ATTEMPTS = 3
 
 SYSTEM_PROMPT = """You are a careful health assistant. Answer in the user's language.
 
@@ -186,7 +188,23 @@ async def _complete(
         body["response_format"] = response_format
 
     try:
-        response = await _http_client().post("/v1/chat/completions", json=body)
+        response = None
+        for attempt in range(L2_MAX_ATTEMPTS):
+            try:
+                response = await _http_client().post(
+                    "/v1/chat/completions",
+                    json=body,
+                )
+            except httpx.TimeoutException:
+                if attempt == L2_MAX_ATTEMPTS - 1:
+                    raise
+            else:
+                retryable = response.status_code == 429 or 500 <= response.status_code < 600
+                if not retryable or attempt == L2_MAX_ATTEMPTS - 1:
+                    break
+            await asyncio.sleep(float(2**attempt))
+        if response is None:
+            raise TypeError("missing completion response")
         response.raise_for_status()
         choice = response.json()["choices"][0]
         if not isinstance(choice, dict) or not isinstance(choice.get("message"), dict):
