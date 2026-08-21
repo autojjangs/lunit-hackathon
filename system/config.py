@@ -38,7 +38,7 @@ CONFIG = {
     "extra": {},
 
     # Stage 0: one structured call performs multi-turn rewrite + routing.
-    "rewrite": False,
+    "rewrite": True,
     "case_summary": True,
     "planner_thinking": False,
     "planner_max_tokens": 1024,
