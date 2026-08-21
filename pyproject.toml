@@ -1,0 +1,51 @@
+[project]
+name = "healthbench-l2-harness"
+version = "0.1.0"
+description = "Two-stage L2 retrieval harness for CoEval HealthBench"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "coeval @ git+https://github.com/lunit-io/CoEval.git@741263cfafba687f8baeb7422c747ef9557df1c4",
+  "httpx>=0.27.0,<1",
+  "mcp>=2.0.0,<3",
+  "pydantic>=2.8.0,<3",
+]
+
+[project.scripts]
+healthbench-eval = "healthbench_harness.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3.0",
+  "pytest-asyncio>=0.24.0",
+  "ruff>=0.7.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/healthbench_harness"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.uv]
+# CoEval declares its optional local GPU serving stack as a hard dependency.
+# The harness only consumes CoEval's dataset/runner/metrics on macOS; serving is remote.
+override-dependencies = ["sglang; sys_platform == 'linux'"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q --tb=short -p no:rerunfailures"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
+ignore = ["E501"]

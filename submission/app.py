@@ -1,62 +1,104 @@
-"""Submission driver — OpenAI-compatible multi-turn conversation service.
-
-Required by the rules:
-  * container starts with no manual step, serves on 0.0.0.0:8000
-  * GET /v1/models and POST /v1/chat/completions
-  * the evaluator posts each conversation turn; we return the next assistant message
-
-Design notes:
-  * STATELESS. The evaluator sends the whole history every turn. We never keep a
-    session, so a restart mid-evaluation loses nothing.
-  * FAIL-FAST. Startup validates model credentials, and an unrecoverable
-    inference failure terminates the worker so evaluation stops immediately.
-  * The evaluation VM is network-isolated except for the Lunit endpoints, so
-    everything must already be inside the image. No downloads at runtime.
-"""
+"""OpenAI-compatible submission service for the L2 HealthBench driver."""
 
 from __future__ import annotations
 
-import os
 import sys
 import time
 import traceback
 import uuid
+from contextlib import asynccontextmanager
+from typing import Any
 
-from fastapi import FastAPI
+import httpx
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from system.config import CONFIG, L2_MODEL  # noqa: E402
-from system import l2 as l2client  # noqa: E402
-from system import run as sysrun  # noqa: E402
-
-app = FastAPI(title="conquer-health-driver")
-MODEL_ID = L2_MODEL
-
-if not CONFIG["api_key"].strip().startswith("lunit_"):
-    raise RuntimeError("LUNIT_FM_API_KEY is missing or invalid")
+from healthbench_harness.config import HarnessConfig
+from healthbench_harness.mcp_client import StreamableHTTPMCPGateway
+from healthbench_harness.openai_client import OpenAIChatClient
+from healthbench_harness.runtime import GenerationRuntime, RetrievalRuntime
 
 
-def _log_fatal(stage: str, error: Exception) -> str:
-    message = str(error).replace("\n", " ")[:500]
-    detail = f"{type(error).__name__}: {message}"
-    print(
-        f"FATAL stage={stage} error={detail}",
-        file=sys.stderr,
-        flush=True,
+class SubmissionDriver:
+    """Shared upstream clients with request-local generation state."""
+
+    def __init__(
+        self,
+        *,
+        config: HarnessConfig,
+        l2: OpenAIChatClient,
+        retrieval: RetrievalRuntime,
+        http_client: httpx.AsyncClient,
+    ) -> None:
+        self.config = config
+        self.l2 = l2
+        self.retrieval = retrieval
+        self.http_client = http_client
+
+    async def generate(self, messages: list[dict[str, Any]]) -> str:
+        runtime = GenerationRuntime(
+            l2=self.l2,
+            retrieval=self.retrieval,
+            config=self.config,
+        )
+        return await runtime.generate(messages)
+
+    async def close(self) -> None:
+        await self.http_client.aclose()
+
+
+async def build_driver() -> SubmissionDriver:
+    config = HarnessConfig.from_env(require_key=True)
+    assert config.lunit_api_key is not None
+    http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(config.l2_timeout_s, connect=10.0),
+        limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
     )
-    return detail
-
-
-@app.on_event("startup")
-async def verify_model_access():
+    l2 = OpenAIChatClient(
+        api_base=config.l2_api_base,
+        model=config.l2_model,
+        api_key=config.lunit_api_key,
+        timeout_s=config.l2_timeout_s,
+        max_retries=config.l2_max_retries,
+        max_concurrency=config.l2_max_concurrency,
+        max_tokens=config.l2_max_tokens,
+        enable_thinking=config.l2_enable_thinking,
+        client=http_client,
+    )
+    mcp = StreamableHTTPMCPGateway(
+        url=config.mcp_url,
+        bearer_token=config.lunit_api_key,
+        timeout_s=config.mcp_timeout_s,
+        max_concurrent_sessions=config.mcp_max_concurrent_sessions,
+    )
+    retrieval = RetrievalRuntime(l2=l2, mcp=mcp, config=config)
     try:
-        await l2client.preflight()
-    except Exception as e:  # noqa: BLE001 - preserve startup cause in runner logs
-        _log_fatal("startup_preflight", e)
+        models = await l2.list_models()
+        if config.l2_model not in models:
+            raise RuntimeError(f"required model unavailable: {config.l2_model}")
+    except Exception:
+        await http_client.aclose()
         raise
+    return SubmissionDriver(
+        config=config,
+        l2=l2,
+        retrieval=retrieval,
+        http_client=http_client,
+    )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    driver = await build_driver()
+    app.state.driver = driver
+    try:
+        yield
+    finally:
+        await driver.close()
+
+
+app = FastAPI(title="lunit-healthbench-driver", lifespan=lifespan)
 
 
 class Message(BaseModel):
@@ -66,66 +108,97 @@ class Message(BaseModel):
 
 class ChatRequest(BaseModel):
     model: str | None = None
-    messages: list[Message] = []
-    stream: bool | None = False
+    messages: list[Message] = Field(min_length=1)
+    stream: bool = False
+
+
+def _error(status_code: int, message: str, *, code: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": {
+                "message": message,
+                "type": "invalid_request_error" if status_code < 500 else "server_error",
+                "code": code,
+            }
+        },
+    )
 
 
 @app.get("/health")
-async def health():
+async def health(request: Request) -> dict[str, Any]:
+    driver: SubmissionDriver = request.app.state.driver
     return {
         "ok": True,
-        "model": CONFIG["model"],
-        "rewrite": CONFIG["rewrite"],
-        "retrieval": CONFIG["retrieval"],
-        "critic": CONFIG["critic_pass"],
-        "retrieval_mode": CONFIG["retrieval_tool_choice"],
+        "model": driver.config.l2_model,
+        "l2_max_concurrency": driver.config.l2_max_concurrency,
+        "mcp_max_concurrent_sessions": driver.config.mcp_max_concurrent_sessions,
     }
 
 
 @app.get("/v1/models")
-async def models():
+async def models(request: Request) -> dict[str, Any]:
+    driver: SubmissionDriver = request.app.state.driver
     return {
         "object": "list",
-        "data": [{"id": MODEL_ID, "object": "model", "owned_by": "team"}],
+        "data": [
+            {
+                "id": driver.config.l2_model,
+                "object": "model",
+                "created": 0,
+                "owned_by": "lunit-hackathon-team",
+            }
+        ],
     }
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(req: ChatRequest):
-    convo = [
-        {"role": m.role, "content": m.content or ""}
-        for m in req.messages
-        if m.role in ("user", "assistant") and (m.content or "").strip()
+async def chat_completions(request: Request, body: ChatRequest):
+    if body.stream:
+        return _error(
+            400,
+            "streaming responses are not supported",
+            code="streaming_not_supported",
+        )
+
+    messages = [
+        {"role": message.role, "content": message.content or ""}
+        for message in body.messages
+        if message.role in {"system", "developer", "user", "assistant"}
+        and (message.content or "").strip()
     ]
-    if not convo:
-        return JSONResponse(
-            status_code=400,
-            content={"error": {"message": "no user/assistant messages"}},
+    if not messages or not any(message["role"] == "user" for message in messages):
+        return _error(
+            400,
+            "at least one non-empty user message is required",
+            code="missing_user_message",
         )
-    t0 = time.time()
+
+    driver: SubmissionDriver = request.app.state.driver
     try:
-        text = await sysrun.answer(convo)
-    except Exception as e:  # noqa: BLE001
-        traceback.print_exc()
-        detail = _log_fatal("request_pipeline", e)
-        return JSONResponse(
-            status_code=500,
-            content={"error": {"message": detail}},
-        )
+        answer = await driver.generate(messages)
+    except Exception as error:  # noqa: BLE001 - preserve evaluator diagnostics
+        traceback.print_exc(file=sys.stderr)
+        detail = f"{type(error).__name__}: {str(error).replace(chr(10), ' ')[:300]}"
+        print(f"FATAL stage=request_pipeline error={detail}", file=sys.stderr, flush=True)
+        return _error(500, detail, code="driver_failure")
+
+    model = driver.config.l2_model
     return {
-        "id": f"chatcmpl-{uuid.uuid4().hex[:16]}",
+        "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": MODEL_ID,
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": text},
-            "finish_reason": "stop",
-        }],
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": answer},
+                "finish_reason": "stop",
+            }
+        ],
         "usage": {
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
-            "latency_ms": round((time.time() - t0) * 1000),
         },
     }
