@@ -13,7 +13,6 @@ COPY submission/ /app/submission/
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
     LUNIT_FM_API_URL=https://model.hackathon.lunit.io \
-    LUNIT_FM_API_KEY=lunit_mHCixQhPzR--PRq4FEmZnx1yzdtQLCegz_E_SL58b20 \
     LUNIT_FM_MODEL=Lunit/L2-preview \
     LUNIT_MCP_URL=https://mcp.hackathon.lunit.io/mcp
 

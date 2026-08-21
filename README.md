@@ -60,7 +60,9 @@ multi-turn service를 구성합니다. 전체 conversation history를 요청마�
 
 ```bash
 docker build -t lunit-healthbench-submission:local .
-docker run --rm -p 8000:8000 lunit-healthbench-submission:local
+docker run --rm -p 8000:8000 \
+  --env LUNIT_FM_API_KEY \
+  lunit-healthbench-submission:local
 curl http://127.0.0.1:8000/v1/models
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
@@ -68,8 +70,10 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 ```
 
 Container는 worker 1개로 실행되며 L2 요청은 최대 15개, MCP retrieval session은 최대
-8개로 제한합니다. Dashboard에는 `lunit/hackathon-submission` branch HEAD의 40자리 SHA와
-model name `Lunit/L2-preview`를 입력합니다.
+8개로 제한합니다. `LUNIT_FM_API_KEY`는 image나 Git 이력에 포함하지 않고 evaluation
+runtime의 secret 환경변수로 주입해야 합니다. Dashboard에는
+`lunit/hackathon-submission` branch HEAD의 40자리 SHA와 model name
+`Lunit/L2-preview`를 입력합니다.
 
 이미 생성된 trajectory를 OpenAI Batch API로 채점하려면 다음 명령을 사용합니다.
 Batch는 문항별 rubric을 개별 JSONL 요청으로 만들며 한 파일의 요청은 모두 동일한
