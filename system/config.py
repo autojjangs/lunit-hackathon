@@ -48,7 +48,7 @@ CONFIG = {
     "history_turns": 0,
 
     # Stage 1: retrieval is run only when the structured plan requests it.
-    "retrieval": False,
+    "retrieval": True,
     "retrieval_thinking": False,
     "retrieval_max_tokens": 1024,
     "max_mcp_calls": 4,
