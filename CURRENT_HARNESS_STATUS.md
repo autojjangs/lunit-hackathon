@@ -1,8 +1,8 @@
 # HealthBench L2 Harness 현재 구현 및 운영 규칙
 
 > 기준 시각: 2026-08-22 (Asia/Seoul)
-> 기준 브랜치 HEAD: `1903945` (`fix: close generation retrieval rounds`)
-> 주의: 아래의 최신 구현은 아직 working tree에 커밋되지 않은 변경을 포함한다.
+> 기준 코드: `72eed50` (`feat: harden retrieval recovery and generation validation`)
+> 제출 브랜치는 이 코드와 container driver를 함께 포함한다.
 
 ## 1. 문서 목적
 
@@ -695,11 +695,52 @@ Batch는 1,157/1,157 request가 완료됐고 failed request는 0이다. 결과�
 4,096/재생성 8,192 설정은 truncation을 해소하면서 completeness와 instruction following을
 회복시켰고, 현재까지 완료된 100개 비교 run 중 가장 높은 headline score를 기록했다.
 
+### 16.2 4,096/8,192-token 500개 평가
+
+Run: `evaluation_outputs/2026-08-22/00-47-20-373380`
+
+Generation 결과:
+
+| 항목 | 결과 |
+|---|---:|
+| 최종 validated generation | 500/500 |
+| initial failure | 60/500 |
+| initial failure 중 rate limit | 57 |
+| automatic sample retry | 57/60 성공 |
+| 선택 재시도 | 3/3 성공 |
+| 최종 inference failure | 0 |
+| generation 소요 시간 | 409.55초 |
+| `OUTPUT_TRUNCATED` issue | 5건, 모두 복구 |
+| retrieval call rate | 4% |
+| retrieval trajectory | 20 |
+| retrieval termination failure | 0 |
+| rejected retrieval | 96 |
+
+최종 CoEval 결과:
+
+| 지표 | 500개 결과 |
+|---|---:|
+| HealthBench Rubric | 49.46점 |
+| pass | 265/500 |
+| inference failure | 0 |
+| scoring failure | 0 |
+| accuracy | 60.92점 |
+| completeness | 45.69점 |
+| context awareness | 38.81점 |
+| instruction following | 60.00점 |
+| communication quality | 64.02점 |
+
+OpenAI Batch는 5,649개 rubric request를 57개 chunk로 나눠 처리했으며
+5,649/5,649 완료, failed request 0이었다. 100개 run의 51.21보다 headline은 1.75점
+낮지만, 표본이 100개에서 500개로 확장됐으므로 직접적인 regression으로 단정하지 않는다.
+500개 결과에서는 instruction following 60.00, communication quality 64.02가 유지됐고,
+context seeking theme는 45.92로 상대적으로 낮았다.
+
 ## 17. 테스트와 코드 품질 상태
 
 2026-08-22 현재:
 
-- pytest 수집: 135 tests
+- pytest 수집: 142 tests (harness 137 + submission API 5)
 - 전체 pytest: 통과
 - Ruff: 통과
 - `git diff --check`: 통과
@@ -711,9 +752,9 @@ sample retry, batch judge validation gate, thinking telemetry가 포함된다.
 
 ## 18. 알려진 한계와 다음 확인 항목
 
-1. **현재 변경은 미커밋 상태**
-   - HEAD 이후 deterministic validation, compact retrieval, retry, prompt/config 변경이
-     working tree에 존재한다. 신규 100개 점수를 확인한 뒤 snapshot commit이 필요하다.
+1. **현재 변경은 제출 snapshot에 포함됨**
+   - deterministic validation, compact retrieval, retry, prompt/config 변경은
+     `72eed50`에 커밋되었고 제출 브랜치에 반영한다.
 2. **Output token과 thinking의 상호작용**
    - 2,048 설정에서는 최종 4개가 반복적으로 truncation됐다. 4,096/8,192 설정에서
      truncation rate, repetition, completeness가 어떻게 변하는지 확인한다.
@@ -746,3 +787,26 @@ sample retry, batch judge validation gate, thinking telemetry가 포함된다.
 - [ ] direct/gate-rejected/actual-retrieval 그룹별 점수 변화는 어떤가?
 - [ ] OpenAI Batch rubric request가 전부 완료됐는가?
 - [ ] 결과가 확인된 현재 working tree를 commit했는가?
+
+## 20. 순차 50개 실험 결과
+
+상세 기록은 `HARNESS_EXPERIMENT_LOG.md`에 보존한다.
+
+| Experiment | HealthBench | Reference 대비 | 판정 |
+|---|---:|---:|---|
+| Reference first 50 | 57.19 | — | 기준 |
+| 001 retrieval prefilter | 53.78 | -3.41 | 되돌림 |
+| 002 compact retrieval bridge | 55.36 | -1.84 | 되돌림 |
+| 003 final coverage pass | 56.31 | -0.89 | 되돌림 |
+| 004 code-specific rejection recovery | 59.67 | +2.47 | 100개에서 미확인 |
+
+현재 코드에는 Experiment 004만 남아 있다. runtime gate가 current/source/transformation 요청을
+차단한 경우에는 lookup 차단 자체를 이유로 불필요한 context를 묻지 않고 stable knowledge로
+원 task를 직접 완수하도록 한다. missing jurisdiction과 unresolved ambiguity는 각각 필요한
+질문 하나만 하도록 별도 recovery feedback을 사용한다.
+
+Experiment 004의 100개 재검증은 HealthBench 51.29로 동일 100개 reference 51.21 대비
++0.08이었다. context awareness(+4.49)와 communication quality(+6.09)는 올랐지만 pass는
+56→51, instruction following은 -10.58이었다. 양쪽 run에서 모두 gate-rejected된 동일
+16개도 -0.25여서 50개 개선을 재현하지 못했다. 따라서 Experiment 004의 상태는
+`잠정 채택`에서 `100개에서 미확인`으로 낮춘다.

@@ -276,7 +276,7 @@ async def test_unknown_tools_are_blocked_without_an_unbounded_retrieval_loop() -
 
 
 @pytest.mark.asyncio
-async def test_generation_exposes_only_bridge_and_returns_without_retrieval(tmp_path) -> None:
+async def test_generation_exposes_only_bridge_for_stable_knowledge_question(tmp_path) -> None:
     l2 = FakeL2(
         [
             ChatCompletion(
@@ -301,6 +301,32 @@ async def test_generation_exposes_only_bridge_and_returns_without_retrieval(tmp_
     ]
     assert "generation stage" in l2.requests[0]["messages"][0]["content"]
     assert "Retrieval is an exception" in l2.requests[0]["messages"][0]["content"]
+    trace = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
+    assert "private chain of thought" not in trace
+    assert '"thinking_enabled":true' in trace
+    assert '"reasoning_call_count":1' in trace
+    assert '"reasoning_char_count":24' in trace
+
+
+@pytest.mark.asyncio
+async def test_generation_exposes_only_bridge_for_current_guidance(tmp_path) -> None:
+    l2 = FakeL2([ChatCompletion(content="Current-guidance answer")])
+    config = HarnessConfig(enable_response_planning=False)
+    runtime = GenerationRuntime(
+        l2=l2,
+        retrieval=RetrievalRuntime(l2=l2, mcp=FakeGateway([]), config=config),
+        config=config,
+        trajectory_writer=TrajectoryWriter(tmp_path / "trace.jsonl"),
+    )
+
+    answer = await runtime.generate(
+        [{"role": "user", "content": "What do current CKD guidelines recommend?"}]
+    )
+
+    assert answer == "Current-guidance answer"
+    assert [tool["function"]["name"] for tool in l2.requests[0]["tools"]] == [
+        "retrieve_relevant_content"
+    ]
     required = l2.requests[0]["tools"][0]["function"]["parameters"]["required"]
     assert "retrieval_trigger" in required
     assert "why_external_evidence_is_required" in required
@@ -309,11 +335,6 @@ async def test_generation_exposes_only_bridge_and_returns_without_retrieval(tmp_
     assert "relevant_context" not in required
     assert "jurisdiction" not in required
     assert "must_preserve" not in required
-    trace = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
-    assert "private chain of thought" not in trace
-    assert '"thinking_enabled":true' in trace
-    assert '"reasoning_call_count":1' in trace
-    assert '"reasoning_char_count":24' in trace
 
 
 @pytest.mark.asyncio
@@ -1374,6 +1395,9 @@ async def test_strict_gate_rejects_stable_knowledge_current_guidance_claim(
     assert answer == "Use relative rest and gradual loading."
     assert gateway.fake_session.calls == []
     assert l2.requests[-1]["tools"] is None
+    assert "Do not ask for more context merely" in l2.requests[-1]["messages"][-1][
+        "content"
+    ]
     trace = runtime.writer.path.read_text()
     assert '"retrieval_called":false' in trace
     assert "requires an explicit current" in trace

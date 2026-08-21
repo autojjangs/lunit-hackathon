@@ -525,7 +525,6 @@ _UNRESOLVED_AMBIGUITY = re.compile(
     re.IGNORECASE,
 )
 
-
 def _user_conversation_text(conversation: list[dict[str, Any]] | None) -> str:
     if not conversation:
         return ""
@@ -618,6 +617,36 @@ def _retrieval_gate_rejection(
         )
     return None
 
+
+def _retrieval_rejection_feedback(code: str, reason: str) -> str:
+    prefix = f"Retrieval request rejected by the strict gate: {reason}. "
+    if code in {
+        "current_need_not_user_requested",
+        "source_not_user_requested",
+        "transformation_without_source_request",
+    }:
+        return prefix + (
+            "Do not mention retrieval or the rejection. Answer the original request now "
+            "from the full conversation, supplied content, and stable medical knowledge. "
+            "Do not ask for more context merely because external lookup was blocked. "
+            "Preserve the requested language and format and cover every explicit subtask. "
+            "Ask a focused question only if a missing patient fact would materially change "
+            "immediate safety or the next action."
+        )
+    if code == "missing_jurisdiction":
+        return prefix + (
+            "Ask only for the missing country or jurisdiction needed to answer the "
+            "original request safely; do not add a generic medical explanation."
+        )
+    if code == "unresolved_ambiguity":
+        return prefix + (
+            "Ask one concise question that lets the user identify the ambiguous term. "
+            "Do not answer using the guessed expansion."
+        )
+    return prefix + (
+        "Answer from the full conversation and stable knowledge, or ask only the missing "
+        "decision-relevant question."
+    )
 
 def _effective_mcp_tool_call(
     name: str, arguments: dict[str, Any], allowed_names: set[str]
@@ -1776,10 +1805,9 @@ class GenerationRuntime:
                         messages.append(
                             _tool_result(
                                 call.id,
-                                "Retrieval request rejected by the strict gate: "
-                                f"{rejection_reason}. Answer from the full conversation and "
-                                "stable knowledge, or ask only the missing decision-relevant "
-                                "question.",
+                                _retrieval_rejection_feedback(
+                                    rejection_code, rejection_reason
+                                ),
                             )
                         )
                         force_no_tools = True
