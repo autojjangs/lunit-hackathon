@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 import pipeline
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -23,7 +25,7 @@ app = FastAPI(title="conquer-health-final", lifespan=lifespan)
 
 
 class Message(BaseModel):
-    role: Literal["user", "assistant"]
+    role: str
     content: str | None = None
 
 
@@ -50,13 +52,11 @@ async def models():
 async def chat_completions(request: ChatRequest):
     if request.stream:
         raise HTTPException(status_code=400, detail="streaming is not supported")
-    if request.model not in {None, pipeline.MODEL}:
-        raise HTTPException(status_code=400, detail="unsupported model")
 
     conversation = [
         {"role": message.role, "content": (message.content or "").strip()}
         for message in request.messages
-        if (message.content or "").strip()
+        if message.role in {"user", "assistant"} and (message.content or "").strip()
     ]
     if not conversation or conversation[-1]["role"] != "user":
         raise HTTPException(status_code=400, detail="the conversation must end with a user message")
@@ -64,6 +64,7 @@ async def chat_completions(request: ChatRequest):
     try:
         content = await pipeline.answer(conversation)
     except pipeline.InferenceError as exc:
+        logger.exception("response generation failed")
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return {
