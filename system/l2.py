@@ -13,23 +13,21 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from typing import Any
 
 import httpx
 
-from system.config import CONFIG
+from system.config import CONFIG, L2_API_BASE, L2_MODEL
 
 MAX_TOKENS_CAP = 2048  # server-enforced; requests above this return 400
 
 
 def _base() -> str:
-    return (CONFIG.get("api_base") or os.environ.get(
-        "LUNIT_FM_API_URL", "https://model.hackathon.lunit.io")).rstrip("/")
+    return L2_API_BASE.rstrip("/")
 
 
 def _key() -> str:
-    return CONFIG.get("api_key") or os.environ.get("LUNIT_FM_API_KEY", "")
+    return CONFIG.get("api_key", "")
 
 
 _client: httpx.AsyncClient | None = None
@@ -59,6 +57,12 @@ async def preflight() -> None:
         raise L2Error(f"model preflight failed: {type(e).__name__}: {e}") from e
     if r.status_code != 200:
         raise L2Error(f"model preflight failed: {r.status_code} {r.text[:200]}")
+    try:
+        model_ids = {item.get("id") for item in r.json().get("data", [])}
+    except (TypeError, ValueError) as e:
+        raise L2Error("model preflight returned an invalid model list") from e
+    if L2_MODEL not in model_ids:
+        raise L2Error(f"required model unavailable: {L2_MODEL}")
 
 
 async def chat(
@@ -81,7 +85,7 @@ async def chat(
     think = CONFIG["thinking"] if thinking is None else thinking
     mt = min(max_tokens or CONFIG["max_tokens"], MAX_TOKENS_CAP)
     body: dict[str, Any] = {
-        "model": CONFIG["model"],
+        "model": L2_MODEL,
         "messages": messages,
         "max_tokens": mt,
         "temperature": CONFIG["temperature"] if temperature is None else temperature,
@@ -126,7 +130,6 @@ async def text(messages: list[dict], **kw) -> str:
 
 async def structured(messages: list[dict], schema: dict, **kw) -> dict:
     """JSON-schema-constrained call. Verified working on L2 (response_format)."""
-    kw.setdefault("thinking", False)
     raw = await text(messages, json_schema=schema, **kw)
     try:
         return json.loads(raw)

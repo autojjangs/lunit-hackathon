@@ -28,12 +28,12 @@ from pydantic import BaseModel
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from system.config import CONFIG  # noqa: E402
+from system.config import CONFIG, L2_MODEL  # noqa: E402
 from system import l2 as l2client  # noqa: E402
 from system import run as sysrun  # noqa: E402
 
 app = FastAPI(title="conquer-health-driver")
-MODEL_ID = os.environ.get("DRIVER_MODEL_ID", "conquer-health")
+MODEL_ID = L2_MODEL
 
 if not CONFIG["api_key"].strip().startswith("lunit_"):
     raise RuntimeError("LUNIT_FM_API_KEY is missing or invalid")
@@ -57,7 +57,14 @@ class ChatRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "model": CONFIG["model"], "retrieval": CONFIG["retrieval"]}
+    return {
+        "ok": True,
+        "model": CONFIG["model"],
+        "rewrite": CONFIG["rewrite"],
+        "retrieval": CONFIG["retrieval"],
+        "critic": CONFIG["critic_pass"],
+        "retrieval_mode": CONFIG["retrieval_tool_choice"],
+    }
 
 
 @app.get("/v1/models")
@@ -92,7 +99,7 @@ async def chat_completions(req: ChatRequest):
         "id": f"chatcmpl-{uuid.uuid4().hex[:16]}",
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": req.model or MODEL_ID,
+        "model": MODEL_ID,
         "choices": [{
             "index": 0,
             "message": {"role": "assistant", "content": text},

@@ -1,88 +1,84 @@
-"""THE ENTRY POINT.  answer(conversation) -> str
-
-Contract — never changes:
-
-    async def answer(conversation: list[dict]) -> str
-
-Used by three callers that must never diverge:
-    evalkit/run_eval.py   local HealthBench loop
-    serve.py              OpenAI-compatible server for real CoEval
-    submission/app.py     the container that gets judged
+"""Stable entry point: ``answer(conversation) -> str``.
 
 Pipeline:
-    conversation
-      -> rewrite.condition()      multi-turn -> (messages, standalone query)   [phase 2]
-      -> generation.answer()      route -> retrieval stage -> generation stage
-      -> critic()                 penalty-pattern defence pass                [optional]
-      -> str
+    original conversation
+      -> structured intake/rewrite/router (one L2 call)
+      -> source-bounded retrieval when planned (optional)
+      -> final L2 generation (one L2 call)
+      -> conservative evidence-aware critic (optional)
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 
-from system import generation, l2, rewrite
+from system import critic, generation, intake, telemetry
 from system.config import CONFIG
 
-# kept importable for evalkit's SHOW_SYSTEM_PROMPT_TO_JUDGE flag
+# Kept importable for the local evaluator's optional judge context.
 SYSTEM_PROMPT = generation.PROMPT
 
-CRITIC_PROMPT = """Revise the draft answer so that it:
-- answers exactly what was asked, without expanding past that scope
-- keeps every clinically important point, including red flags and when to seek care
-- does not assert a definitive diagnosis without qualifying it
-- does not bury the key guidance under unnecessary detail
-- keeps any [n] citations exactly as they are
 
-Return ONLY the revised answer, no preamble.
+async def _pipeline(conversation: list[dict]) -> tuple[str, dict]:
+    if int(CONFIG.get("num_candidates", 1)) != 1:
+        raise ValueError(
+            "num_candidates must remain 1; longest-answer selection was removed"
+        )
 
-# Question
-{q}
+    total_started = time.perf_counter()
 
-# Draft
-{draft}"""
+    started = time.perf_counter()
+    plan = await intake.create_plan(conversation)
+    planner_ms = round((time.perf_counter() - started) * 1000)
 
+    started = time.perf_counter()
+    draft, generation_meta = await generation.answer(conversation, plan)
+    generation_ms = round((time.perf_counter() - started) * 1000)
 
-async def _once(conversation: list[dict]) -> tuple[str, dict]:
-    convo, query = await rewrite.condition(conversation)
-    out, meta = await generation.answer(convo, query)
-    return out, meta
+    evidence_text = str(generation_meta.get("evidence_text") or "")
+    started = time.perf_counter()
+    final, critic_meta = await critic.revise(
+        conversation,
+        plan,
+        draft,
+        evidence_text=evidence_text,
+        n_evidence=int(generation_meta.get("n_evidence", 0)),
+    )
+    critic_ms = round((time.perf_counter() - started) * 1000)
+
+    meta = {
+        "plan": plan,
+        "generation": generation_meta,
+        "critic": critic_meta,
+        "latency_ms": {
+            "planner": planner_ms,
+            "generation_including_retrieval": generation_ms,
+            "critic": critic_ms,
+            "total": round((time.perf_counter() - total_started) * 1000),
+        },
+    }
+    return final, meta
 
 
 async def answer(conversation: list[dict]) -> str:
-    n = max(1, int(CONFIG.get("num_candidates", 1)))
-    if n == 1:
-        draft, _meta = await _once(conversation)
-    else:
-        # the server rejects n>1, so candidates are independent requests
-        cands = await asyncio.gather(
-            *[_once(conversation) for _ in range(n)], return_exceptions=True
-        )
-        ok = [c[0] for c in cands if isinstance(c, tuple) and c[0]]
-        if not ok:
-            raise RuntimeError("all candidates failed")
-        draft = max(ok, key=len)  # placeholder selector — replace with a real judge
-
-    if CONFIG.get("critic_pass"):
-        q = rewrite.last_user(conversation)
-        revised = await l2.text(
-            [{"role": "user", "content": CRITIC_PROMPT.format(q=q, draft=draft)}],
-            thinking=CONFIG["critic_thinking"],
-            max_tokens=CONFIG["max_tokens"],
-        )
-        if revised:
-            draft = revised
-
-    if not draft.strip():
-        raise RuntimeError("empty answer")
-    return draft
+    final, meta = await _pipeline(conversation)
+    await telemetry.emit(conversation, meta)
+    return final
 
 
 async def answer_verbose(conversation: list[dict]) -> tuple[str, dict]:
-    """Same pipeline, but returns the routing/retrieval metadata. Debug only."""
-    return await _once(conversation)
+    """Production path plus plan/retrieval/critic trace for diagnostics."""
+    final, meta = await _pipeline(conversation)
+    await telemetry.emit(conversation, meta)
+    return final, meta
 
 
 if __name__ == "__main__":
-    demo = [{"role": "user", "content": "I've had a dull headache for three days. Should I worry?"}]
+    demo = [
+        {
+            "role": "user",
+            "content": "I've had a dull headache for three days. Should I worry?",
+        }
+    ]
     print(asyncio.run(answer(demo)))
