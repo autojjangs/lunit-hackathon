@@ -1,10 +1,7 @@
-.venv/
-data/
-runs/
-evalkit/splits/
 .git/
+.env
 __pycache__/
 *.pyc
-.env
-.DS_Store
-*.html
+tests/
+*.json
+*.md

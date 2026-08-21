@@ -1,13 +1,7 @@
-# Conquer Health — explicit MCP submission
+# Conquer Health submission
 
-Stateless OpenAI-compatible multi-turn driver for `Lunit/L2-preview`.
+OpenAI-compatible Lunit L2 driver using an A4 checklist, one-pass Self-Refine,
+and deterministic final-answer cutoff and internal-data-leak gates.
 
-    system/context.py       preserves original conversation
-    system/routing.py       explicit deterministic source routing
-    system/retrieval.py     source-specific Lunit MCP workflows
-    system/generation.py    one final L2 answer
-    system/guards.py        truncation and protocol-leak checks
-    system/run.py           answer() orchestration
-    submission/app.py       port-8000 service
-
-No benchmark data, rubric text, answer cache, or per-item rule is included.
+The service listens on `0.0.0.0:8000` and implements `GET /v1/models` and
+`POST /v1/chat/completions`.
