@@ -21,10 +21,12 @@ import sys
 import time
 import traceback
 import uuid
+from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -33,6 +35,11 @@ from system import run as sysrun  # noqa: E402
 
 app = FastAPI(title="conquer-health-driver")
 MODEL_ID = os.environ.get("DRIVER_MODEL_ID", "conquer-health")
+ROOT = Path(__file__).resolve().parent.parent
+UI_DIR = ROOT / "ui"
+
+if UI_DIR.exists():
+    app.mount("/ui", StaticFiles(directory=UI_DIR, html=True), name="ui")
 
 
 class Message(BaseModel):
@@ -42,8 +49,41 @@ class Message(BaseModel):
 
 class ChatRequest(BaseModel):
     model: str | None = None
-    messages: list[Message] = []
+    messages: list[Message] = Field(default_factory=list)
     stream: bool | None = False
+
+
+def _conversation(req: ChatRequest) -> list[dict[str, str]]:
+    return [
+        {"role": m.role, "content": m.content or ""}
+        for m in req.messages
+        if m.role in ("user", "assistant") and (m.content or "").strip()
+    ]
+
+
+def _empty_conversation_error() -> JSONResponse:
+    return JSONResponse(
+        status_code=400,
+        content={"error": {"message": "no user/assistant messages"}},
+    )
+
+
+@app.get("/", include_in_schema=False)
+async def ui_home():
+    if UI_DIR.exists():
+        return RedirectResponse(url="/ui/")
+    return JSONResponse(
+        status_code=404,
+        content={"error": {"message": "UI assets are not installed"}},
+    )
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    icon = UI_DIR / "favicon.svg"
+    if icon.exists():
+        return FileResponse(icon)
+    return JSONResponse(status_code=404, content={})
 
 
 @app.get("/health")
@@ -59,18 +99,57 @@ async def models():
     }
 
 
+@app.get("/debug/config", include_in_schema=False)
+async def debug_config():
+    """Expose only non-secret knobs used to produce the answer shown in the UI."""
+    keys = (
+        "model",
+        "max_tokens",
+        "temperature",
+        "retrieval",
+        "retrieval_tool_choice",
+        "retrieval_thinking",
+        "max_mcp_calls",
+        "retrieval_max_tokens",
+        "prompt",
+        "generation_thinking",
+        "cite",
+        "rewrite",
+        "case_summary",
+        "history_turns",
+        "critic_pass",
+        "num_candidates",
+    )
+    return {"model_id": MODEL_ID, "config": {key: CONFIG.get(key) for key in keys}}
+
+
+@app.post("/debug/chat", include_in_schema=False)
+async def debug_chat(req: ChatRequest):
+    """Run the submitted pipeline and return observability data for the local UI."""
+    convo = _conversation(req)
+    if not convo:
+        return _empty_conversation_error()
+    t0 = time.perf_counter()
+    try:
+        text, meta = await sysrun.answer_verbose(convo)
+    except Exception as e:  # noqa: BLE001
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"message": f"{type(e).__name__}: {e}"}},
+        )
+    return {
+        "message": {"role": "assistant", "content": text},
+        "meta": meta,
+        "latency_ms": round((time.perf_counter() - t0) * 1000),
+    }
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatRequest):
-    convo = [
-        {"role": m.role, "content": m.content or ""}
-        for m in req.messages
-        if m.role in ("user", "assistant") and (m.content or "").strip()
-    ]
+    convo = _conversation(req)
     if not convo:
-        return JSONResponse(
-            status_code=400,
-            content={"error": {"message": "no user/assistant messages"}},
-        )
+        return _empty_conversation_error()
     t0 = time.time()
     try:
         text = await sysrun.answer(convo)

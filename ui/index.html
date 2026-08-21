@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Lunit L2 의료 대화 하네스 관찰 및 검토 UI">
+  <title>Conquer Health · Harness Lab</title>
+  <link rel="icon" href="/favicon.ico" type="image/svg+xml">
+  <link rel="stylesheet" href="/ui/styles.css">
+  <script src="/ui/app.js" defer></script>
+</head>
+<body>
+  <div class="ambient ambient-one" aria-hidden="true"></div>
+  <div class="ambient ambient-two" aria-hidden="true"></div>
+
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="/ui/" aria-label="Conquer Health 홈">
+        <span class="brand-mark" aria-hidden="true">
+          <span></span><span></span>
+        </span>
+        <span>
+          <strong>CONQUER HEALTH</strong>
+          <small>L2 HARNESS LAB</small>
+        </span>
+      </a>
+
+      <div class="topbar-center" aria-label="현재 실험 상태">
+        <span class="experiment-label">EXPERIMENT</span>
+        <span class="experiment-name" id="experiment-name">B0 · RAW L2</span>
+      </div>
+
+      <div class="topbar-actions">
+        <span class="connection-pill" id="connection-status">
+          <span class="status-dot"></span>
+          <span>연결 확인 중</span>
+        </span>
+        <button class="icon-button" id="theme-button" type="button" aria-label="화면 테마 전환" title="화면 테마 전환">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v2m0 14v2M3 12h2m14 0h2M5.64 5.64l1.42 1.42m9.88 9.88 1.42 1.42m0-12.72-1.42 1.42M7.06 16.94l-1.42 1.42M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <aside class="control-rail" aria-label="실험 제어판">
+        <section class="rail-section session-section">
+          <div class="section-heading">
+            <span>SESSION</span>
+            <span class="turn-count" id="turn-count">0 / 3 TURNS</span>
+          </div>
+          <div class="turn-meter" id="turn-meter" aria-label="대화 턴 진행률">
+            <span></span><span></span><span></span>
+          </div>
+          <button class="primary-action" id="new-chat-button" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+            새 대화
+          </button>
+          <div class="paired-actions">
+            <button class="quiet-button" id="regenerate-button" type="button" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>
+              재생성
+            </button>
+            <button class="quiet-button" id="export-button" type="button" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 19h14"/></svg>
+              내보내기
+            </button>
+          </div>
+        </section>
+
+        <section class="rail-section config-section">
+          <div class="section-heading">
+            <span>ACTIVE CONFIG</span>
+            <button class="text-button" id="refresh-config-button" type="button">새로고침</button>
+          </div>
+          <div class="config-grid" id="config-grid">
+            <div class="config-skeleton"></div>
+            <div class="config-skeleton"></div>
+            <div class="config-skeleton"></div>
+          </div>
+          <p class="config-note" id="config-note">서버 설정을 불러오는 중입니다.</p>
+        </section>
+
+        <section class="rail-section preset-section">
+          <div class="section-heading">
+            <span>QUESTION SET</span>
+            <span>5</span>
+          </div>
+          <div class="preset-list">
+            <button class="preset-card" type="button" data-prompt="3일째 머리가 묵직하게 아픈데 병원에 가야 할까요?">
+              <span class="preset-index">01</span>
+              <span><strong>증상 · 두통</strong><small>위험도 선별과 행동 지침</small></span>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+            </button>
+            <button class="preset-card" type="button" data-prompt="가이드라인에 따르면 만성 신장질환 성인의 혈압 목표는 어떻게 되나요?">
+              <span class="preset-index">02</span>
+              <span><strong>가이드라인 · CKD</strong><small>정확한 권고 근거 검색</small></span>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+            </button>
+            <button class="preset-card" type="button" data-prompt="와파린을 복용 중인데 허리가 아파서 이부프로펜을 먹어도 될까요?">
+              <span class="preset-index">03</span>
+              <span><strong>의약품 · 상호작용</strong><small>안전성 및 대안 안내</small></span>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+            </button>
+            <button class="preset-card" type="button" data-prompt="건강보험에서 비급여 진료비를 환자에게 설명해야 하는 법적 의무가 있나요?">
+              <span class="preset-index">04</span>
+              <span><strong>법률 · 건강보험</strong><small>현행 조문과 적용 범위</small></span>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+            </button>
+            <button class="preset-card" type="button" data-prompt="아토르바스타틴을 먹은 뒤부터 근육통이 생겼어요. 약을 끊어야 하나요?">
+              <span class="preset-index">05</span>
+              <span><strong>의약품 · 이상반응</strong><small>라벨 근거와 진료 시점</small></span>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+            </button>
+          </div>
+        </section>
+      </aside>
+
+      <main class="conversation-panel">
+        <div class="panel-header">
+          <div>
+            <p class="eyebrow">CONVERSATION REVIEW</p>
+            <h1>의료 대화 관찰실</h1>
+          </div>
+          <div class="panel-summary">
+            <span id="message-count">0 messages</span>
+            <span class="divider-dot"></span>
+            <span>전체 history 전송</span>
+          </div>
+        </div>
+
+        <div class="chat-scroll" id="chat-scroll">
+          <div class="empty-state" id="empty-state">
+            <div class="empty-visual" aria-hidden="true">
+              <span class="pulse-ring ring-one"></span>
+              <span class="pulse-ring ring-two"></span>
+              <span class="medical-cross"><i></i><b></b></span>
+            </div>
+            <p class="eyebrow">READY FOR REVIEW</p>
+            <h2>첫 번째 의료 질문을 입력하세요</h2>
+            <p>직접 질문하거나 왼쪽의 대표 질문을 선택하면<br>답변과 내부 retrieval 경로를 함께 확인할 수 있습니다.</p>
+            <div class="empty-hints">
+              <span><i></i> 대화 이력 보존</span>
+              <span><i></i> 근거 추적</span>
+              <span><i></i> 턴별 지연시간</span>
+            </div>
+          </div>
+          <div class="message-list" id="message-list" aria-live="polite"></div>
+        </div>
+
+        <div class="error-banner" id="error-banner" role="alert" hidden>
+          <div>
+            <strong>응답을 생성하지 못했습니다</strong>
+            <span id="error-message"></span>
+          </div>
+          <button id="retry-button" type="button">다시 시도</button>
+        </div>
+
+        <form class="composer" id="composer">
+          <label class="sr-only" for="message-input">의료 질문 입력</label>
+          <textarea id="message-input" rows="1" maxlength="6000" placeholder="증상, 복용 중인 약, 가이드라인에 대해 질문하세요…"></textarea>
+          <div class="composer-footer">
+            <span><kbd>Enter</kbd> 전송 · <kbd>Shift</kbd> + <kbd>Enter</kbd> 줄바꿈</span>
+            <div>
+              <span class="char-count" id="char-count">0 / 6000</span>
+              <button class="send-button" id="send-button" type="submit" disabled>
+                <span>전송</span>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 14-8-4 16-3-6-7-2Zm7 2 7-10"/></svg>
+              </button>
+            </div>
+          </div>
+        </form>
+        <p class="medical-notice">연구·평가용 인터페이스입니다. 실제 응급상황에서는 119 또는 응급의료기관에 연락하세요.</p>
+      </main>
+
+      <aside class="inspector" aria-label="모델 실행 정보">
+        <div class="inspector-header">
+          <div>
+            <p class="eyebrow">OBSERVABILITY</p>
+            <h2>실행 검사기</h2>
+          </div>
+          <span class="live-indicator"><i></i> LIVE</span>
+        </div>
+
+        <div class="tab-list" role="tablist" aria-label="실행 정보 탭">
+          <button class="tab-button active" type="button" role="tab" data-tab="overview" aria-selected="true">개요</button>
+          <button class="tab-button" type="button" role="tab" data-tab="trace" aria-selected="false">Trace <span id="trace-count">0</span></button>
+          <button class="tab-button" type="button" role="tab" data-tab="evidence" aria-selected="false">근거 <span id="evidence-count">0</span></button>
+          <button class="tab-button" type="button" role="tab" data-tab="history" aria-selected="false">History</button>
+        </div>
+
+        <div class="inspector-body">
+          <section class="tab-panel active" data-panel="overview" role="tabpanel">
+            <div class="metric-grid">
+              <article class="metric-card"><span>ROUTE</span><strong id="metric-route">—</strong></article>
+              <article class="metric-card"><span>LATENCY</span><strong id="metric-latency">—</strong></article>
+              <article class="metric-card"><span>EVIDENCE</span><strong id="metric-evidence">—</strong></article>
+              <article class="metric-card"><span>STATUS</span><strong id="metric-status">IDLE</strong></article>
+            </div>
+            <div class="inspect-block">
+              <div class="inspect-label"><span>STANDALONE QUERY</span><button class="copy-mini" type="button" data-copy-target="standalone-query">복사</button></div>
+              <p class="query-box empty" id="standalone-query">아직 실행된 질문이 없습니다.</p>
+            </div>
+            <div class="inspect-block">
+              <div class="inspect-label"><span>RETRIEVAL QUERY</span><button class="copy-mini" type="button" data-copy-target="retrieval-query">복사</button></div>
+              <p class="query-box empty" id="retrieval-query">Retrieval이 실행되면 여기에 표시됩니다.</p>
+            </div>
+            <div class="route-diagram" aria-label="L2 처리 단계">
+              <div class="route-node active" id="route-generation"><span>01</span><strong>Generation</strong><small>route decision</small></div>
+              <div class="route-line"><i></i></div>
+              <div class="route-node" id="route-retrieval"><span>02</span><strong>Retrieval</strong><small>MCP evidence</small></div>
+              <div class="route-line"><i></i></div>
+              <div class="route-node" id="route-answer"><span>03</span><strong>Answer</strong><small>final response</small></div>
+            </div>
+            <div class="inspector-placeholder" id="overview-placeholder">
+              <span>i</span>
+              <p>Assistant 답변을 선택하면<br>해당 턴의 실행 정보를 표시합니다.</p>
+            </div>
+          </section>
+
+          <section class="tab-panel" data-panel="trace" role="tabpanel" hidden>
+            <div class="panel-section-header"><div><span>MCP TOOL TRAJECTORY</span><small>선택한 assistant 턴</small></div></div>
+            <div class="trace-list" id="trace-list"></div>
+            <div class="inspector-placeholder" id="trace-placeholder"><span>↗</span><p>Retrieval tool call이 아직 없습니다.</p></div>
+          </section>
+
+          <section class="tab-panel" data-panel="evidence" role="tabpanel" hidden>
+            <div class="panel-section-header"><div><span>SELECTED EVIDENCE</span><small>finalize_retrieval 결과</small></div></div>
+            <div class="evidence-list" id="evidence-list"></div>
+            <div class="inspector-placeholder" id="evidence-placeholder"><span>§</span><p>선택된 citation 근거가 없습니다.</p></div>
+          </section>
+
+          <section class="tab-panel" data-panel="history" role="tabpanel" hidden>
+            <div class="panel-section-header">
+              <div><span>EXACT MESSAGE HISTORY</span><small>다음 요청에 그대로 전송</small></div>
+              <button class="copy-mini" id="copy-history-button" type="button">JSON 복사</button>
+            </div>
+            <pre class="history-json" id="history-json">[]</pre>
+          </section>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

@@ -49,10 +49,11 @@ async def _once(conversation: list[dict]) -> tuple[str, dict]:
     return out, meta
 
 
-async def answer(conversation: list[dict]) -> str:
+async def answer_verbose(conversation: list[dict]) -> tuple[str, dict]:
+    """Run the submitted pipeline and return routing metadata for the local UI."""
     n = max(1, int(CONFIG.get("num_candidates", 1)))
     if n == 1:
-        draft, _meta = await _once(conversation)
+        draft, meta = await _once(conversation)
     else:
         # the server rejects n>1, so candidates are independent requests
         cands = await asyncio.gather(
@@ -62,6 +63,10 @@ async def answer(conversation: list[dict]) -> str:
         if not ok:
             raise RuntimeError("all candidates failed")
         draft = max(ok, key=len)  # placeholder selector — replace with a real judge
+
+        selected = next(c for c in cands if isinstance(c, tuple) and c[0] == draft)
+        meta = selected[1]
+        meta["candidate_count"] = len(ok)
 
     if CONFIG.get("critic_pass"):
         q = rewrite.last_user(conversation)
@@ -75,12 +80,12 @@ async def answer(conversation: list[dict]) -> str:
 
     if not draft.strip():
         raise RuntimeError("empty answer")
+    return draft, meta
+
+
+async def answer(conversation: list[dict]) -> str:
+    draft, _meta = await answer_verbose(conversation)
     return draft
-
-
-async def answer_verbose(conversation: list[dict]) -> tuple[str, dict]:
-    """Same pipeline, but returns the routing/retrieval metadata. Debug only."""
-    return await _once(conversation)
 
 
 if __name__ == "__main__":

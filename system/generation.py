@@ -65,7 +65,15 @@ def _finalize(text: str, meta: dict) -> str:
 
 async def answer(conversation: list[dict], _query: str) -> tuple[str, dict]:
     """Answer from memory or let L2 call the separate retrieval stage once."""
-    meta: dict = {"route": "direct", "trace": [], "status": None}
+    meta: dict = {
+        "route": "direct",
+        "trace": [],
+        "status": None,
+        "standalone_query": _query,
+        "retrieval_query": None,
+        "n_evidence": 0,
+        "evidence": [],
+    }
 
     sysp = load_prompt()
     if CONFIG["retrieval"] and sysp:
@@ -122,14 +130,20 @@ async def answer(conversation: list[dict], _query: str) -> tuple[str, dict]:
                         "route": "retrieve",
                         "trace": ret["trace"],
                         "status": ret["status"],
+                        "retrieval_query": rq.strip(),
                         "n_evidence": len(ret["evidence"]),
+                        "evidence": retrieval.inspect_evidence(ret),
                     })
                 except Exception as exc:  # retrieval failure must not lose the turn
                     result = (
                         "status: no_evidence\nnote: retrieval failed: "
                         f"{type(exc).__name__}"
                     )
-                    meta.update({"route": "retrieve", "status": "no_evidence"})
+                    meta.update({
+                        "route": "retrieve",
+                        "retrieval_query": rq.strip(),
+                        "status": "no_evidence",
+                    })
             else:
                 result = "status: no_evidence\nnote: invalid retrieval query"
                 meta.update({"route": "retrieve", "status": "no_evidence"})

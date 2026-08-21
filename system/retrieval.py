@@ -171,14 +171,14 @@ def _pack(final: dict, seen: dict, trace: list[str]) -> dict:
     if not isinstance(items, list):
         items = []
     picked = [
-        i.get("cite_uid") for i in items
+        (i.get("cite_uid"), i.get("relevance_score")) for i in items
         if isinstance(i, dict) and i.get("cite_uid")
     ]
     ev = []
-    for uid in picked:
+    for uid, score in picked:
         item = seen.get(uid)
         if item:
-            ev.append({"cite_uid": uid, "item": item})
+            ev.append({"cite_uid": uid, "relevance_score": score, "item": item})
     status = final.get("status", "no_evidence")
     if status not in {"sufficient", "partial", "no_evidence"}:
         status = "no_evidence"
@@ -192,6 +192,37 @@ def _pack(final: dict, seen: dict, trace: list[str]) -> dict:
         "evidence": ev,
         "trace": trace,
     }
+
+
+def inspect_evidence(ret: dict, limit_per_item: int = 12000) -> list[dict]:
+    """Return selected evidence in a compact, UI-friendly shape."""
+    views = []
+    for marker, evidence in enumerate(ret.get("evidence") or [], 1):
+        item = evidence.get("item") or {}
+        body = item.get("content") or item.get("text")
+        if not body and isinstance(item.get("pages"), list):
+            page_parts = []
+            for page in item["pages"]:
+                if not isinstance(page, dict):
+                    continue
+                page_no = page.get("page", "?")
+                page_text = page.get("text") or ""
+                page_parts.append(f"p. {page_no}\n{page_text}")
+            body = "\n\n".join(page_parts)
+        if not body and isinstance(item.get("row"), dict):
+            body = json.dumps(item["row"], ensure_ascii=False, indent=2)
+        if not body:
+            body = json.dumps(item, ensure_ascii=False, indent=2)
+        views.append({
+            "marker": marker,
+            "cite_uid": evidence.get("cite_uid", ""),
+            "relevance_score": evidence.get("relevance_score"),
+            "source_type": item.get("source_type", "unknown"),
+            "title": item.get("title") or item.get("name") or "Untitled source",
+            "url": item.get("url") or item.get("doc_url") or "",
+            "content": str(body)[:limit_per_item],
+        })
+    return views
 
 
 def render(ret: dict, limit: int = 6000) -> str:

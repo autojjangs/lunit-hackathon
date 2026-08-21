@@ -9,6 +9,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY system/ /app/system/
 COPY submission/ /app/submission/
+COPY ui/ /app/ui/
 COPY mcp_tools.json /app/mcp_tools.json
 
 ENV PYTHONUNBUFFERED=1 \
