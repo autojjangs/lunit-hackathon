@@ -10,21 +10,20 @@ from typing import Any
 import httpx
 
 MODEL = "Lunit/L2-preview"
-API_BASE = "https://model.hackathon.lunit.io"
+API_BASE = "http://61.107.202.7:9412"
 MAX_TOKENS = 2048
 CHECKLIST_TOKENS = 512
 L2_MAX_ATTEMPTS = 3
 
 SYSTEM_PROMPT = """You are a careful health assistant. Answer in the user's language.
 
-1. Answer the user's actual question and give the practical next action first.
-2. Use the full conversation, but do not repeat information already given.
-3. Separate known facts, reasonable possibilities, and unknowns. Never invent patient details, diagnoses, medication identities, or mechanisms. Verify numerical and dosage comparisons before answering.
-4. Match urgency to the evidence provided. Clearly distinguish present danger from conditional warning signs. Do not introduce rare or catastrophic explanations unless they materially change the user's next action.
-5. For medications, consider identity uncertainty, contraindications, interactions, duplicate ingredients, and whether the medicine was prescribed for this user.
-6. Be concise but complete. Include only information that improves safety or helps the user decide what to do. Ask questions only when the answers would materially change the guidance.
+1. Start with the direct answer and next action; do not use a preamble.
+2. If the given facts indicate a current emergency, say so in the first sentence and give the immediate action. Otherwise do not dramatize conditional or rare risks.
+3. Use the full conversation. Separate known facts, reasonable possibilities, and unknowns. Never invent patient details, diagnoses, medication identities, or mechanisms. Verify numbers and doses.
+4. Include only what changes the user's decision: essential rationale, safety-critical warnings, and relevant medication identity uncertainty, contraindications, interactions, or duplicate ingredients. Ask only questions that materially change the guidance.
+5. Keep the entire answer within 1,800 characters. Compress background, examples, caveats, and repetition before omitting a requested part or safety-critical instruction.
 
-When principles conflict, prioritize preventing serious harm, factual accuracy, answering the user's request, and then brevity."""
+Priority: prevent serious harm, factual accuracy, instruction following, concision."""
 
 CHECKLIST_PROMPT = """Create a private task checklist for the next answer.
 
@@ -116,8 +115,10 @@ parts of the draft; do not invent patient facts or medical evidence. Return only
 complete user-facing answer and never mention the checklist, draft, or feedback."""
 
 REWRITE_PROMPT = """The previous answer was cut off by the output limit.
-Write the complete answer again from the beginning. Be substantially more concise,
-finish well within the output limit, and do not mention the previous attempt."""
+Write the complete answer again from the beginning in at most 1,400 characters. Include
+only the requested answer, practical next action, essential rationale, and
+safety-critical warnings. Omit preambles, repetition, exhaustive examples, tables,
+and nonessential caveats. End cleanly and do not mention the previous attempt."""
 
 INTERNAL_LEAK_REWRITE_PROMPT = """The previous answer exposed private internal working data.
 Write the answer again from the beginning using only the original conversation. Do
@@ -400,23 +401,16 @@ async def answer(conversation: list[dict[str, str]]) -> str:
         if cut_off:
             repair_prompt += "\n\n" + REWRITE_PROMPT
         retry_thinking = not cut_off
-        retry_messages = [
-            {"role": "system", "content": _system_message(repair_prompt=repair_prompt)},
-            *conversation,
-        ]
     elif cut_off:
         repair_prompt = REWRITE_PROMPT
         retry_thinking = False
-        retry_messages = _refine_messages(
-            conversation,
-            checklist,
-            draft,
-            feedback,
-            repair_prompt=repair_prompt,
-        )
     else:
         return final_answer
 
+    retry_messages = [
+        {"role": "system", "content": _system_message(repair_prompt=repair_prompt)},
+        *conversation,
+    ]
     rewritten, retry_reason = await _complete(
         retry_messages,
         thinking=retry_thinking,
