@@ -6,6 +6,12 @@ import pipeline
 
 
 class CutoffRepairTest(unittest.IsolatedAsyncioTestCase):
+    def test_system_prompt_uses_sentence_admission_rules(self):
+        self.assertIn("Every sentence must do at least one", pipeline.SYSTEM_PROMPT)
+        self.assertIn("State each point once", pipeline.SYSTEM_PROMPT)
+        self.assertIn("Stop when all requested parts", pipeline.SYSTEM_PROMPT)
+        self.assertNotIn("characters", pipeline.SYSTEM_PROMPT)
+
     async def test_cutoff_rewrite_is_short_and_uses_only_original_conversation(self):
         calls = []
         checklist = {
